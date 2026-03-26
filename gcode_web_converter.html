@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>X-Winder Dwell Converter</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: ui-monospace, 'Cascadia Code', 'Fira Mono', monospace;
+    background: #0d0e12; color: #c8ccd4;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 40px 20px 60px;
+  }
+  header { text-align: center; margin-bottom: 36px; }
+  header h1 { font-size: 20px; font-weight: 600; color: #e8eaf0; margin-bottom: 8px; }
+  header p { font-size: 12px; color: #5a6070; max-width: 560px; line-height: 1.65; }
+  .card { background: #14161d; border: 1px solid #22252e; border-radius: 10px; padding: 26px; width: 100%; max-width: 700px; margin-bottom: 18px; }
+  .card-title { font-size: 10px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase; color: #454a58; margin-bottom: 14px; }
+  #dropzone { border: 2px dashed #2a2d38; border-radius: 8px; padding: 36px 20px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; position: relative; }
+  #dropzone:hover, #dropzone.dragover { border-color: #3d6abf; background: #161a24; }
+  #dropzone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  #dropzone .icon { font-size: 28px; margin-bottom: 8px; opacity: .35; }
+  #dropzone .label { font-size: 12px; color: #5a6070; }
+  #dropzone .label span { color: #4a7de8; }
+  #fname { margin-top: 8px; font-size: 11px; color: #7a8299; min-height: 16px; }
+  .options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media(max-width:500px){ .options-grid { grid-template-columns: 1fr; } }
+  label.opt { display: flex; flex-direction: column; gap: 4px; font-size: 10px; color: #5a6070; letter-spacing: .5px; text-transform: uppercase; }
+  label.opt input, label.opt select { background: #0d0e12; border: 1px solid #22252e; border-radius: 5px; color: #c8ccd4; font-family: inherit; font-size: 12px; padding: 6px 9px; outline: none; transition: border-color .2s; }
+  label.opt input:focus { border-color: #3d6abf; }
+  label.opt input[type=checkbox] { width: 15px; height: 15px; accent-color: #4a7de8; }
+  .checkbox-row { flex-direction: row; align-items: center; gap: 8px; font-size: 11px; text-transform: none; letter-spacing: 0; color: #8a90a0; margin-top: 2px; }
+  #convertBtn { width: 100%; padding: 11px; background: #1e3a7a; border: 1px solid #2a4da0; border-radius: 7px; color: #9ab8f8; font-family: inherit; font-size: 12px; font-weight: 600; letter-spacing: .5px; cursor: pointer; transition: background .2s; margin-top: 16px; }
+  #convertBtn:hover:not(:disabled) { background: #2a4da0; color: #c4d8ff; }
+  #convertBtn:disabled { opacity: .35; cursor: default; }
+  #log { background: #0a0b0f; border: 1px solid #1a1c24; border-radius: 7px; padding: 12px; font-size: 11px; line-height: 1.7; min-height: 80px; max-height: 280px; overflow-y: auto; white-space: pre-wrap; color: #5a6270; }
+  .log-ok   { color: #3a9e6a; }
+  .log-info { color: #4a7de8; }
+  .log-warn { color: #c8892a; }
+  .log-err  { color: #e24b4a; }
+  .log-head { color: #8a90a0; }
+  #dlBtn { display: none; width: 100%; padding: 11px; background: #1a3a22; border: 1px solid #2a5a34; border-radius: 7px; color: #6ecf8a; font-family: inherit; font-size: 12px; font-weight: 600; letter-spacing: .5px; cursor: pointer; transition: background .2s; margin-top: 12px; text-align: center; text-decoration: none; }
+  #dlBtn:hover { background: #223a2a; }
+  #stats { display: none; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+  .stat { background: #0d0e12; border: 1px solid #1e2028; border-radius: 6px; padding: 9px 12px; text-align: center; }
+  .stat .n { font-size: 20px; font-weight: 600; color: #4a7de8; }
+  .stat .l { font-size: 9px; color: #454a58; text-transform: uppercase; letter-spacing: .8px; margin-top: 2px; }
+  .warn-box { background: #1a1200; border: 1px solid #4a3800; border-radius: 6px; padding: 10px 13px; font-size: 11px; color: #c8892a; line-height: 1.6; margin-bottom: 12px; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>X-Winder Dwell Converter</h1>
+  <p>Replaces <code>G4 L601/L602</code> register-based dwells with timed <code>G4 P</code> pauses. Correctly computes the per-pass angular <em>increment</em> rather than the cumulative absolute angle, so every dwell is the same short duration instead of growing pass-by-pass.</p>
+</header>
+
+<div class="card">
+  <div class="card-title">1 — Upload G-Code File</div>
+  <div id="dropzone">
+    <input type="file" id="fileInput" accept=".x4g,.txt,.gcode,.nc">
+    <div class="icon">⬆</div>
+    <div class="label">Drop file here or <span>click to browse</span></div>
+    <div class="label" style="margin-top:3px;font-size:10px">Accepts .X4G · .txt · .gcode</div>
+  </div>
+  <div id="fname"></div>
+</div>
+
+<div class="card">
+  <div class="card-title">2 — Options</div>
+  <div class="options-grid">
+    <label class="opt">
+      RPM Override (0 = auto-detect per layer)
+      <input type="number" id="rpmOverride" value="0" min="0" step="0.1">
+    </label>
+    <label class="opt">
+      Timing Pad ms (added to every dwell)
+      <input type="number" id="timePad" value="0" min="0" step="1">
+    </label>
+    <label class="opt">
+      Output Filename
+      <input type="text" id="outName" placeholder="auto">
+    </label>
+    <label class="opt">
+      Also convert G4 C360 end-of-pass dwells?
+      <label class="checkbox-row opt">
+        <input type="checkbox" id="replaceC360">
+        Convert full-revolution dwells too
+      </label>
+    </label>
+  </div>
+  <button id="convertBtn" disabled>Convert File</button>
+</div>
+
+<div class="card">
+  <div class="card-title">3 — Result</div>
+  <div class="warn-box" id="warnBox"></div>
+  <div id="stats">
+    <div class="stat"><div class="n" id="sTotal">0</div><div class="l">Lines Changed</div></div>
+    <div class="stat"><div class="n" id="sPasses">0</div><div class="l">Passes Found</div></div>
+    <div class="stat"><div class="n" id="sLayers">0</div><div class="l">Layers Found</div></div>
+    <div class="stat"><div class="n" id="sIncrement">—</div><div class="l">Increment (ms)</div></div>
+  </div>
+  <div id="log">Waiting for file…</div>
+  <a id="dlBtn" download>⬇ Download Converted File</a>
+</div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const dropzone  = document.getElementById('dropzone');
+let rawText = '', originalName = '';
+
+dropzone.addEventListener('dragover',  e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('dragover'); if(e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => { if(e.target.files[0]) loadFile(e.target.files[0]); });
+
+function loadFile(file) {
+  originalName = file.name;
+  document.getElementById('fname').textContent = `📄 ${file.name}  (${(file.size/1024).toFixed(1)} KB)`;
+  const r = new FileReader();
+  r.onload = ev => {
+    rawText = ev.target.result;
+    document.getElementById('convertBtn').disabled = false;
+    clearLog();
+    log('head', `File loaded: ${file.name}`);
+    log('info', `${rawText.split('\n').length} lines read.`);
+    const base = file.name.replace(/\.[^.]+$/,'');
+    document.getElementById('outName').placeholder = `${base}_timed.X4G`;
+  };
+  r.readAsText(file);
+}
+
+function log(type, msg) {
+  const el = document.getElementById('log');
+  if (el.textContent === 'Waiting for file…') el.textContent = '';
+  const span = document.createElement('span');
+  span.className = `log-${type}`;
+  span.textContent = msg + '\n';
+  el.appendChild(span);
+  el.scrollTop = el.scrollHeight;
+}
+function clearLog() { document.getElementById('log').textContent = ''; }
+
+function degToMs(deg, rpm) {
+  if (rpm <= 0 || deg <= 0) return 0;
+  return Math.max(1, Math.round((deg / 360) * (60000 / rpm)));
+}
+function extractComment(line) {
+  const m = line.match(/\[.*\]/); return m ? m[0] : '';
+}
+
+document.getElementById('convertBtn').addEventListener('click', () => {
+  if (!rawText) return;
+  clearLog();
+  document.getElementById('warnBox').style.display = 'none';
+
+  const rpmOverride = parseFloat(document.getElementById('rpmOverride').value) || 0;
+  const timePad     = parseInt(document.getElementById('timePad').value) || 0;
+  const replaceC360 = document.getElementById('replaceC360').checked;
+
+  const lines = rawText.split('\n');
+  let currentRpm = 30.0;
+  let changedCount = 0, passCount = 0, layerCount = 0;
+
+  // ── KEY FIX: track last C value for each register (L601, L602)
+  // so we compute the DELTA (increment) not the raw cumulative C value.
+  // Within each layer, the registers reset at the first M601/M602.
+  const lastC = { 601: 0, 602: 0 };  // last dwell C for each register
+  let inNewLayer = false;
+  let incrementMs = null;
+  const allIncrements = [];
+
+  const newLines = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line  = lines[i];
+    const code  = line.replace(/\[.*?\]/g, '').trim();
+
+    // Track layer starts — reset register state
+    const layerMatch = line.match(/LA=(\d+)_of_(\d+).*?PA=1_of_/i);
+    if (layerMatch) {
+      layerCount++;
+      lastC[601] = 0;
+      lastC[602] = 0;
+      inNewLayer = true;
+      log('head', `\nLayer ${layerMatch[1]} of ${layerMatch[2]} — registers reset.`);
+    }
+
+    // Track pass count
+    if (/LA=\d+_of_\d+.*?PA=\d+_of_\d+/i.test(line)) passCount++;
+
+    // Track RPM from M4 Sxxx
+    const rpmM = code.match(/\bM4\s+S([\d.]+)/i);
+    if (rpmM) currentRpm = parseFloat(rpmM[1]);
+
+    const rpm = rpmOverride > 0 ? rpmOverride : currentRpm;
+
+    // ── Register dwell: G4 L601 Cxx.xx or G4 L602 Cxx.xx
+    const regMatch = code.match(/^G4\s+L(\d+)\s+C([\d.]+)/i);
+    if (regMatch) {
+      const regNum  = parseInt(regMatch[1]);
+      const absC    = parseFloat(regMatch[2]);
+      const prevC   = lastC[regNum] ?? 0;
+      // Delta = how much MORE the mandrel needs to rotate from where it left off
+      const deltaC  = absC - prevC;
+      lastC[regNum] = absC;
+
+      const ms = (deltaC > 0 ? degToMs(deltaC, rpm) : 1) + timePad;
+      allIncrements.push(ms - timePad);
+
+      const comment = extractComment(line) || `[Timed: +${deltaC.toFixed(2)}° @ ${rpm}RPM]`;
+      const indent  = line.match(/^\s*/)[0];
+      newLines.push(`${indent}G4 P${ms} ${comment}`);
+      log('ok', `  L${i+1}: G4 L${regNum} C${absC} (prev ${prevC.toFixed(2)}, Δ${deltaC.toFixed(2)}°) → G4 P${ms}ms`);
+      changedCount++;
+      continue;
+    }
+
+    // Optionally replace plain G4 C360 dwells
+    if (replaceC360) {
+      const plainDwell = code.match(/^G4\s+C([\d.]+)/i);
+      if (plainDwell) {
+        const deg = parseFloat(plainDwell[1]);
+        const ms  = degToMs(deg, rpm) + timePad;
+        const comment = extractComment(line) || `[Timed: ${deg}° @ ${rpm}RPM]`;
+        const indent  = line.match(/^\s*/)[0];
+        newLines.push(`${indent}G4 P${ms} ${comment}`);
+        log('warn', `  L${i+1}: G4 C${deg} @ ${rpm}RPM → G4 P${ms}ms`);
+        changedCount++;
+        continue;
+      }
+    }
+
+    newLines.push(line);
+  }
+
+  // Consistency check: all increments should be the same (or very close)
+  const uniqueInc = [...new Set(allIncrements)];
+  const mainInc   = allIncrements.length > 0 ? allIncrements[0] : 0;
+  const consistent = uniqueInc.length <= 3; // allow small rounding differences
+
+  const warnBox = document.getElementById('warnBox');
+  if (!consistent) {
+    warnBox.textContent = `⚠ Warning: dwell increments are not consistent (found ${uniqueInc.slice(0,6).join(', ')}ms...). Check that RPM detection is correct before running on machine.`;
+    warnBox.style.display = 'block';
+    log('err', `\nWARNING: Inconsistent increments detected — ${uniqueInc.length} distinct values found.`);
+  } else {
+    log('ok', `\nAll dwell increments consistent: ${mainInc}ms per pass-step.`);
+  }
+
+  const outText = newLines.join('\n');
+  const blob    = new Blob([outText], {type:'text/plain'});
+  const url     = URL.createObjectURL(blob);
+  const suggested = document.getElementById('outName').value.trim()
+    || document.getElementById('outName').placeholder
+    || 'converted_timed.X4G';
+
+  const dl = document.getElementById('dlBtn');
+  dl.href = url; dl.download = suggested; dl.style.display = 'block';
+
+  document.getElementById('sTotal').textContent  = changedCount;
+  document.getElementById('sPasses').textContent = passCount;
+  document.getElementById('sLayers').textContent = layerCount;
+  document.getElementById('sIncrement').textContent = mainInc + (timePad>0?`+${timePad}`:'');
+  document.getElementById('stats').style.display = 'grid';
+
+  log('head', `\nDone. ${changedCount} lines converted across ${layerCount} layers, ${passCount} passes.`);
+  if (timePad > 0) log('warn', `+${timePad}ms pad applied to every dwell.`);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0c0d0f;font-family:ui-monospace,monospace;color:#bbb;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#topbar{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#14151a;border-bottom:1px solid #252630;flex-shrink:0;flex-wrap:wrap}
+h2{font-size:11px;font-weight:600;color:#dde;letter-spacing:.8px;white-space:nowrap}
+.tbtn{padding:3px 9px;font-size:11px;border:1px solid #333;border-radius:3px;cursor:pointer;background:#1e1f28;color:#aab}
+.tbtn:hover{background:#2a2b38}.tbtn:disabled{opacity:.3;cursor:default}
+#fname{font-size:11px;color:#556;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#cw{flex:1;position:relative;min-height:0;cursor:grab}#cw:active{cursor:grabbing}
+canvas{display:block;width:100%;height:100%}
+#hint{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;pointer-events:none}
+#hint p{font-size:13px;color:#444}
+#controls{padding:6px 10px;background:#14151a;border-top:1px solid #252630;flex-shrink:0}
+.cr{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.cl{font-size:10px;color:#556;min-width:44px;text-align:right}
+input[type=range]{flex:1;min-width:80px;accent-color:#4a90e2}
+.cv{font-size:10px;font-weight:500;min-width:150px;color:#99a}
+#ir{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+.it{font-size:10px;background:#1a1b22;border:1px solid #252635;border-radius:3px;padding:1px 6px;color:#778}
+#legend{position:absolute;top:8px;right:10px;display:flex;flex-direction:column;gap:3px}
+.ld{display:flex;align-items:center;gap:5px;font-size:10px;color:#556}
+.lc{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h2>X-WINDER VIZ</h2>
+  <button class="tbtn" onclick="document.getElementById('fi').click()">📂 Open File</button>
+  <input type="file" id="fi" accept=".x4g,.txt" style="display:none">
+  <span id="fname">No file loaded — upload .X4G or .txt</span>
+  <button class="tbtn" id="pbtn" disabled>▶ Play</button>
+  <button class="tbtn" id="rbtn" disabled>↺ Reset</button>
+  <span style="font-size:10px;color:#333">drag=orbit · scroll=zoom</span>
+</div>
+<div id="cw"><canvas id="c"></canvas>
+  <div id="hint"><div style="font-size:32px;opacity:.1">⬆</div><p>Upload an .X4G or .txt G-code file</p></div>
+  <div id="legend"></div>
+</div>
+<div id="controls">
+  <div class="cr"><span class="cl">Layer</span><input type="range" id="ls" min="0" max="0" value="0" disabled><span class="cv" id="lv">—</span></div>
+  <div class="cr"><span class="cl">Pass</span><input type="range" id="ps" min="0" max="0" value="0" disabled><span class="cv" id="pv">—</span></div>
+  <div class="cr"><span class="cl">Progress</span><input type="range" id="ss" min="0" max="1000" value="0" disabled><span class="cv" id="sv">—</span></div>
+  <div id="ir"><span class="it" id="i1"> </span><span class="it" id="i2"> </span><span class="it" id="i3"> </span><span class="it" id="i4"> </span><span class="it" id="i5"> </span></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const D=Math.PI/180;
+const LC=['#E24B4A','#378ADD','#1D9E75','#EF9F27','#A855F7','#F59E0B','#06B6D4'];
+
+let renderer,scene,camera,sceneRoot=null;
+let spinG=null;   // rotates with mandrel (tube mesh + all fiber ribbons)
+let staticG=null; // static (frame, tool head)
+let curMesh=null, toolMesh=null;
+let allMeshes=[];
+let parsed=null;
+let cL=0,cP=0,cProg=0;
+let playing=false;
+let rotX=0.28,rotY=-0.45,zoom=1;
+let drag=false,dL={x:0,y:0};
+let mAng=0,prevT=0;
+
+// ─── Three.js ─────────────────────────────────────────────────────────────────
+function initThree(){
+  renderer=new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.setClearColor(0x0c0d10);
+  resize();
+  scene=new THREE.Scene();
+  camera=new THREE.PerspectiveCamera(40,1,0.01,100000);
+  scene.add(new THREE.AmbientLight(0xffffff,0.65));
+  const dl=new THREE.DirectionalLight(0xffffff,0.55);dl.position.set(1,2,1.5);scene.add(dl);
+  const dl2=new THREE.DirectionalLight(0x8899cc,0.2);dl2.position.set(-1,-1,-1);scene.add(dl2);
+  window.addEventListener('resize',resize);
+  const el=document.getElementById('cw');
+  el.addEventListener('mousedown',e=>{drag=true;dL={x:e.clientX,y:e.clientY}});
+  el.addEventListener('mousemove',e=>{if(!drag)return;rotY+=(e.clientX-dL.x)*.006;rotX+=(e.clientY-dL.y)*.006;rotX=Math.max(-1.4,Math.min(1.4,rotX));dL={x:e.clientX,y:e.clientY}});
+  el.addEventListener('mouseup',()=>drag=false);
+  el.addEventListener('mouseleave',()=>drag=false);
+  el.addEventListener('touchstart',e=>{drag=true;dL={x:e.touches[0].clientX,y:e.touches[0].clientY}},{passive:true});
+  el.addEventListener('touchmove',e=>{if(!drag)return;rotY+=(e.touches[0].clientX-dL.x)*.006;rotX+=(e.touches[0].clientY-dL.y)*.006;rotX=Math.max(-1.4,Math.min(1.4,rotX));dL={x:e.touches[0].clientX,y:e.touches[0].clientY}},{passive:true});
+  el.addEventListener('touchend',()=>drag=false);
+  el.addEventListener('wheel',e=>{zoom*=e.deltaY>0?1.08:0.93;zoom=Math.max(0.05,Math.min(20,zoom));},{passive:true});
+  prevT=performance.now();
+  requestAnimationFrame(frame);
+}
+function resize(){
+  const w=document.getElementById('cw');
+  renderer.setSize(w.clientWidth,w.clientHeight,false);
+  if(camera){camera.aspect=w.clientWidth/w.clientHeight;camera.updateProjectionMatrix();}
+}
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt=Math.min((now-prevT)/1000,.1);prevT=now;
+  if(playing&&parsed){
+    const lay=parsed.layers[cL],pass=lay&&lay.passes[cP];
+    if(pass){
+      cProg+=dt/3.5; // each pass takes ~3.5s
+      if(cProg>=1){
+        cProg=0;
+        if(allMeshes[cL]&&allMeshes[cL][cP]){allMeshes[cL][cP].visible=true;allMeshes[cL][cP].material.opacity=0.6;}
+        if(cP<lay.passes.length-1)cP++;
+        else if(cL<parsed.layers.length-1){cL++;cP=0;}
+        else{playing=false;document.getElementById('pbtn').textContent='▶ Play';}
+        document.getElementById('ps').max=parsed.layers[cL].passes.length-1;
+        document.getElementById('ps').value=cP;
+        document.getElementById('ls').value=cL;
+        updateUI();
+      }
+      mAng+=dt*2.8;
+      updateCurMesh();
+      document.getElementById('ss').value=Math.round(cProg*1000);
+    }
+  }
+  if(sceneRoot){sceneRoot.rotation.x=rotX;sceneRoot.rotation.y=rotY;sceneRoot.scale.setScalar(zoom);}
+  if(spinG) spinG.rotation.x=mAng;
+  renderer.render(scene,camera);
+}
+
+// ─── Parser ────────────────────────────────────────────────────────────────────
+// KEY INSIGHT: C is always cumulative (incremental), never absolute.
+// For helical G1 without explicit C: ΔC = |ΔZ|×tan(WA°)/R × (180/π)
+// For hoop G1 with explicit C: ΔC = C_value (explicitly given, ~100k° per pass)
+// For G4 with C: ΔC = C_value (mandrel dwell rotation)
+function parseGcode(txt){
+  const lines=txt.split('\n');
+  let lD=3.75,fW=0.23,tL=45;
+  for(const l of lines){
+    let m;
+    if(m=l.match(/LeftDia=([\d.]+)/)) lD=parseFloat(m[1]);
+    if(m=l.match(/FilaWidth=([\d.]+)/)) fW=parseFloat(m[1]);
+    if(m=l.match(/TotLen=([\d.]+)/)) tL=parseFloat(m[1]);
+  }
+  let hZ=1e9,fZ=-1e9;
+  for(const l of lines){
+    const c=l.replace(/\[.*?\]/g,'').trim();
+    if(/^G[14]\b/.test(c)){const m=c.match(/\bZ([\-\d.]+)/);if(m){const v=parseFloat(m[1]);hZ=Math.min(hZ,v);fZ=Math.max(fZ,v);}}
+  }
+  if(hZ===1e9){hZ=0;fZ=tL;}
+  const R=lD/2,mLen=fZ-hZ,midZ=(hZ+fZ)/2;
+  const layers=[];
+  let curL=null,curP=null,sz=hZ,sc=0,sb=0,cWA=55,cH=false;
+  function wp(){if(curP)curP.wps.push({z:sz,c:sc,b:sb});}
+  for(const raw of lines){
+    const dm=raw.match(/LA=(\d+)_of_(\d+).*?PA=(\S+)\s+RPM=[\d.]+\s+CS=[\d.]+\s+WA=(\S+)\s+WM=(\S+)/);
+    if(dm){
+      const ln=parseInt(dm[1]),wA=dm[4],wM=dm[5];
+      const isH=wA==='HOOP'||wM.toUpperCase().includes('HOOP');
+      const ang=isH?90:(parseFloat(wA)||55);
+      cH=isH;cWA=ang;
+      if(!curL||curL.num!==ln){
+        curL={num:ln,type:isH?'HOOP':'HELICAL',angle:ang,passes:[],ci:(ln-1)%LC.length};
+        layers.push(curL);
+      }
+      curP={num:parseInt(dm[3].split('_')[0]),wps:[{z:sz,c:sc,b:sb}],pts:[]};
+      curL.passes.push(curP);continue;
+    }
+    const code=raw.replace(/\[.*?\]/g,'').trim();
+    if(!code)continue;
+    if(/^G1\b/.test(code)){
+      const zm=code.match(/\bZ([\-\d.]+)/),cm=code.match(/\bC([\-\d.]+)/),bm=code.match(/\bB([\-\d.]+)/);
+      if(bm)sb=parseFloat(bm[1]);
+      if(zm){
+        const nz=parseFloat(zm[1]),dz=Math.abs(nz-sz);
+        if(cm) sc+=parseFloat(cm[1]);
+        else if(dz>0.001) sc+=dz*Math.tan(cWA*D)/R*(180/Math.PI);
+        sz=nz;wp();
+      }
+    } else if(/^G4\b/.test(code)){
+      const cm=code.match(/\bC([\-\d.]+)/);
+      if(cm){sc+=parseFloat(cm[1]);wp();}
+    }
+  }
+  for(const lay of layers)for(const p of lay.passes)p.pts=genPts(p.wps,R,midZ);
+  return {layers,R,hZ,fZ,mLen,midZ,fW,lD};
+}
+
+function genPts(wps,R,midZ){
+  const pts=[];
+  for(let i=0;i<wps.length-1;i++){
+    const a=wps[i],b=wps[i+1];
+    const dC=Math.abs(b.c-a.c),dZ=Math.abs(b.z-a.z);
+    if(dC<0.2&&dZ<0.01)continue;
+    // ~20 samples per revolution, capped at 800
+    const N=Math.max(4,Math.min(800,Math.ceil(dC/18)));
+    for(let s=0;s<=N;s++){
+      const t=s/N,z=a.z+(b.z-a.z)*t,c=a.c+(b.c-a.c)*t;
+      pts.push(new THREE.Vector3(z-midZ,R*Math.sin(c*D),R*Math.cos(c*D)));
+    }
+  }
+  return pts;
+}
+
+// ─── Ribbon geometry ──────────────────────────────────────────────────────────
+// Each point on cylinder surface gets two edge vertices offset by half-width
+// along the binormal direction (T × N, lying on cylinder surface ⊥ to path)
+function buildRibbon(pts,hW){
+  if(pts.length<2)return null;
+  const p=[pts[0]];
+  for(let i=1;i<pts.length;i++)if(pts[i].distanceToSquared(p[p.length-1])>1e-10)p.push(pts[i]);
+  if(p.length<2)return null;
+  const n=p.length,pos=new Float32Array(n*6),nrm=new Float32Array(n*6),idx=[];
+  for(let i=0;i<n;i++){
+    const q=p[i];
+    // Surface outward normal (cylinder axis = X)
+    const rl=Math.sqrt(q.y*q.y+q.z*q.z)||1,Ny=q.y/rl,Nz=q.z/rl;
+    // Path tangent (central difference)
+    let tx,ty,tz;
+    if(i===0){tx=p[1].x-p[0].x;ty=p[1].y-p[0].y;tz=p[1].z-p[0].z;}
+    else if(i===n-1){tx=p[i].x-p[i-1].x;ty=p[i].y-p[i-1].y;tz=p[i].z-p[i-1].z;}
+    else{tx=p[i+1].x-p[i-1].x;ty=p[i+1].y-p[i-1].y;tz=p[i+1].z-p[i-1].z;}
+    const tl=Math.sqrt(tx*tx+ty*ty+tz*tz)||1;tx/=tl;ty/=tl;tz/=tl;
+    // Binormal B = T × N  (N = (0, Ny, Nz))
+    let bx=ty*Nz-tz*Ny,by=-tx*Nz,bz=tx*Ny;
+    const bl=Math.sqrt(bx*bx+by*by+bz*bz)||1;bx/=bl;by/=bl;bz/=bl;
+    const b=i*6;
+    pos[b]=q.x+bx*hW;pos[b+1]=q.y+by*hW;pos[b+2]=q.z+bz*hW;
+    pos[b+3]=q.x-bx*hW;pos[b+4]=q.y-by*hW;pos[b+5]=q.z-bz*hW;
+    nrm[b]=0;nrm[b+1]=Ny;nrm[b+2]=Nz;nrm[b+3]=0;nrm[b+4]=Ny;nrm[b+5]=Nz;
+    if(i>0){const v=(i-1)*2;idx.push(v,v+1,v+2,v+1,v+3,v+2);}
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('normal',new THREE.BufferAttribute(nrm,3));
+  geo.setIndex(idx);
+  return geo;
+}
+
+function mkRib(pts,hW,col,op){
+  const geo=buildRibbon(pts,hW);if(!geo)return null;
+  return new THREE.Mesh(geo,new THREE.MeshPhongMaterial({color:col,side:THREE.DoubleSide,transparent:op<1,opacity:op,shininess:45,emissive:col,emissiveIntensity:0.06}));
+}
+
+// ─── Scene geometry ───────────────────────────────────────────────────────────
+function mkTube(R,hZ,fZ,midZ){
+  const g=new THREE.Group(),mL=fZ-hZ;
+  const cyl=new THREE.CylinderGeometry(R,R,mL,48,1,true);
+  cyl.rotateZ(Math.PI/2);
+  const tm=new THREE.Mesh(cyl,new THREE.MeshPhongMaterial({color:0x1a2535,transparent:true,opacity:0.22,side:THREE.DoubleSide,depthWrite:false}));
+  g.add(tm);
+  // Longitudinal grid lines
+  const gm=new THREE.LineBasicMaterial({color:0x1a2e44,transparent:true,opacity:0.45});
+  for(let k=0;k<8;k++){
+    const a=k/8*Math.PI*2,sa=Math.sin(a)*R,ca=Math.cos(a)*R;
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(hZ-midZ,sa,ca),new THREE.Vector3(fZ-midZ,sa,ca)]),gm));
+  }
+  // Circumferential rings
+  for(let q=0;q<=4;q++){
+    const x=hZ-midZ+q/4*mL,pts=[];
+    for(let j=0;j<=48;j++)pts.push(new THREE.Vector3(x,Math.sin(j/48*Math.PI*2)*R,Math.cos(j/48*Math.PI*2)*R));
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),new THREE.LineBasicMaterial({color:q===0||q===4?0x3366aa:0x1e3a5a,transparent:true,opacity:q===0||q===4?0.8:0.3})));
+  }
+  // Axial stripe (makes rotation visible)
+  const sp=[];for(let j=0;j<=64;j++)sp.push(new THREE.Vector3(hZ-midZ+(j/64)*mL,R*0.998,0));
+  g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(sp),new THREE.LineBasicMaterial({color:0x3355aa,transparent:true,opacity:0.55})));
+  return g;
+}
+
+function mkFrame(R,hZ,fZ,midZ){
+  const g=new THREE.Group();
+  const m1=new THREE.MeshPhongMaterial({color:0x5a6476}),m2=new THREE.MeshPhongMaterial({color:0x35404e});
+  const sz=Math.max(2,R*0.7),side=R+Math.max(6,R*3),railH=R+Math.max(5,R*2.5),mL=fZ-hZ;
+  // Headstocks
+  [hZ,fZ].forEach(x=>{
+    const blk=new THREE.Mesh(new THREE.BoxGeometry(sz,R*2.5,sz),m1);
+    blk.position.set(x-midZ,-R*0.5,side*0.3);g.add(blk);
+    const ch=new THREE.Mesh(new THREE.CylinderGeometry(R*0.88,R*0.88,sz*0.5,20),m2);
+    ch.rotation.z=Math.PI/2;ch.position.set(x-midZ,0,0);g.add(ch);
+    for(let j=0;j<3;j++){const a=j/3*Math.PI*2,jaw=new THREE.Mesh(new THREE.BoxGeometry(sz*0.35,R*0.5,sz*0.35),m2);jaw.position.set(x-midZ,Math.sin(a)*R*0.75,Math.cos(a)*R*0.75);g.add(jaw);}
+  });
+  // Carriage rails
+  const rL=mL+Math.max(20,R*5);
+  [side,side-Math.max(1.5,R*0.5)].forEach(z=>{
+    const r=new THREE.Mesh(new THREE.BoxGeometry(rL,Math.max(0.8,R*0.22),Math.max(0.8,R*0.22)),m2);
+    r.position.set(0,railH,z);g.add(r);
+  });
+  // Base table representation
+  const table=new THREE.Mesh(new THREE.BoxGeometry(rL,Math.max(0.5,R*0.12),Math.max(12,R*5)),m2);
+  table.position.set(0,-R*2.5,side/2);g.add(table);
+  return g;
+}
+
+function mkToolHead(cx,bDeg,R,midZ){
+  const g=new THREE.Group();
+  const side=R+Math.max(6,R*3),railH=R+Math.max(5,R*2.5);
+  const sz=Math.max(1.5,R*0.7);
+  const m1=new THREE.MeshPhongMaterial({color:0x7a8898}),m2=new THREE.MeshPhongMaterial({color:0x3a4555}),m3=new THREE.MeshPhongMaterial({color:0x1a56cc});
+  const scx=cx-midZ;
+  // Carriage block (on rail)
+  const carr=new THREE.Mesh(new THREE.BoxGeometry(sz*2,sz*1.4,sz*2),m1);
+  carr.position.set(scx,railH,side-sz*0.5);g.add(carr);
+  // Stepper motor on back
+  const mot=new THREE.Mesh(new THREE.BoxGeometry(sz*0.9,sz*0.9,sz*0.9),m2);
+  mot.position.set(scx,railH+sz*0.7,side+sz*0.4);g.add(mot);
+  // Cross-feed arm (extends toward tube center, along -Z)
+  const arm=new THREE.Mesh(new THREE.BoxGeometry(sz*0.3,sz*0.3,side),m2);
+  arm.position.set(scx,railH-sz*0.35,side/2);g.add(arm);
+  // Cross-feed stepper at arm tip
+  const xm=new THREE.Mesh(new THREE.CylinderGeometry(sz*0.4,sz*0.4,sz*0.6,12),m1);
+  xm.rotation.z=Math.PI/2;xm.position.set(scx,railH-sz*0.35,0);g.add(xm);
+  // Delivery head group (B-axis: tilts along tube axis)
+  const dh=new THREE.Group();
+  dh.position.set(scx,railH-sz*0.35,0);
+  dh.rotation.x=bDeg*D;
+  const body=new THREE.Mesh(new THREE.BoxGeometry(sz*0.65,sz*0.55,sz*1.5),m3);
+  body.position.set(0,-sz*0.35,-sz*0.65);dh.add(body);
+  // Resin bath on DH
+  const bath=new THREE.Mesh(new THREE.BoxGeometry(sz*0.55,sz*0.25,sz*0.6),new THREE.MeshPhongMaterial({color:0x2d4a22}));
+  bath.position.set(0,-sz*0.12,-sz*0.25);dh.add(bath);
+  // Contact roller
+  const rg=new THREE.CylinderGeometry(sz*0.22,sz*0.22,sz*0.75,14);rg.rotateZ(Math.PI/2);
+  const rl=new THREE.Mesh(rg,new THREE.MeshPhongMaterial({color:0xd0d8e8}));
+  rl.position.set(0,-sz*0.35,-sz*1.35);dh.add(rl);
+  // Fiber tow line from roller to tube surface
+  const fp=[new THREE.Vector3(0,-sz*0.35,-sz*1.35),new THREE.Vector3(0,-sz*0.35,-(sz*1.35+R*0.9))];
+  dh.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(fp),new THREE.LineBasicMaterial({color:0xffc020,linewidth:3})));
+  g.add(dh);
+  return g;
+}
+
+// ─── Full scene setup ─────────────────────────────────────────────────────────
+function setupScene(){
+  if(!parsed)return;
+  if(sceneRoot){scene.remove(sceneRoot);}
+  sceneRoot=new THREE.Group();scene.add(sceneRoot);
+  const{R,hZ,fZ,mLen,midZ,fW}=parsed;
+  // Camera: positioned to see whole tube
+  const camZ=Math.max(mLen*0.75,R*18);
+  camera.position.set(0,R*2.5,camZ);
+  camera.lookAt(0,0,0);
+  camera.near=0.01;camera.far=camZ*25;
+  camera.updateProjectionMatrix();
+  // Spin group (tube + fibers, rotates around X=tube axis)
+  spinG=new THREE.Group();
+  spinG.add(mkTube(R,hZ,fZ,midZ));
+  // Pre-build ALL fiber ribbons (hidden initially)
+  const hW=Math.max(fW/2,R*0.025);
+  allMeshes=parsed.layers.map(lay=>
+    lay.passes.map(pass=>{
+      if(!pass.pts||pass.pts.length<2)return null;
+      const m=mkRib(pass.pts,hW,new THREE.Color(LC[lay.ci]),0.7);
+      if(m){m.visible=false;spinG.add(m);}
+      return m;
+    })
+  );
+  sceneRoot.add(spinG);
+  // Static frame (not in spinG)
+  staticG=new THREE.Group();
+  staticG.add(mkFrame(R,hZ,fZ,midZ));
+  sceneRoot.add(staticG);
+  buildLegend();updateFiberVis();updateCurMesh();updateUI();
+}
+
+function updateFiberVis(){
+  allMeshes.forEach((row,li)=>row.forEach((m,pi)=>{if(m)m.visible=(li<cL)||(li===cL&&pi<cP);}));
+}
+
+function updateCurMesh(){
+  if(!parsed||!spinG||!staticG)return;
+  if(curMesh){spinG.remove(curMesh);curMesh=null;}
+  if(toolMesh){staticG.remove(toolMesh);toolMesh=null;}
+  const lay=parsed.layers[cL],pass=lay&&lay.passes[cP];
+  if(!pass||!pass.pts||pass.pts.length<2)return;
+  const{R,fW,midZ,hZ}=parsed,hW=Math.max(fW/2,R*0.025);
+  const end=Math.max(2,Math.floor(cProg*pass.pts.length));
+  const m=mkRib(pass.pts.slice(0,end),hW,new THREE.Color(LC[lay.ci]),1.0);
+  if(m){curMesh=m;spinG.add(m);}
+  // Tool head at current carriage position
+  const p=pass.pts[Math.min(end-1,pass.pts.length-1)];
+  const wi=Math.min(Math.floor(cProg*(pass.wps.length-1)),pass.wps.length-1);
+  const b=(pass.wps[wi]||{b:0}).b;
+  toolMesh=mkToolHead(p.x+midZ,b,R,midZ);
+  staticG.add(toolMesh);
+}
+
+// ─── UI ───────────────────────────────────────────────────────────────────────
+function updateUI(){
+  if(!parsed)return;
+  const{layers}=parsed,lay=layers[cL],pass=lay&&lay.passes[cP];
+  document.getElementById('ls').max=layers.length-1;document.getElementById('ls').value=cL;
+  document.getElementById('ps').max=lay?lay.passes.length-1:0;document.getElementById('ps').value=cP;
+  document.getElementById('ss').value=Math.round(cProg*1000);
+  document.getElementById('lv').textContent=lay?`${cL+1}/${layers.length} — ${lay.type} ${lay.angle}°`:'—';
+  document.getElementById('pv').textContent=lay?`${cP+1}/${lay.passes.length}`:'—';
+  document.getElementById('sv').textContent=pass?`${Math.floor(cProg*pass.pts.length)} / ${pass.pts.length} pts`:'—';
+  const wi=pass?Math.min(Math.floor(cProg*(pass.wps.length-1)),pass.wps.length-1):0;
+  const wp=pass&&pass.wps[wi];
+  document.getElementById('i1').textContent=wp?`Z ${wp.z.toFixed(2)}"`:' ';
+  document.getElementById('i2').textContent=wp?`C ${(wp.c%360).toFixed(1)}°`:' ';
+  document.getElementById('i3').textContent=wp?`B ${wp.b.toFixed(1)}°`:' ';
+  document.getElementById('i4').textContent=lay?`${lay.type} @ ${lay.angle}°`:' ';
+  document.getElementById('i5').textContent=parsed?`Ø${parsed.lD}" × ${parsed.mLen.toFixed(0)}"`:' ';
+}
+function buildLegend(){
+  if(!parsed)return;
+  const el=document.getElementById('legend');el.innerHTML='';
+  parsed.layers.forEach(l=>el.innerHTML+=`<div class="ld"><div class="lc" style="background:${LC[l.ci]}"></div>L${l.num}: ${l.type} ${l.angle}°</div>`);
+}
+
+document.getElementById('ls').addEventListener('input',e=>{cL=+e.target.value;cP=0;cProg=0;document.getElementById('ps').max=parsed.layers[cL].passes.length-1;document.getElementById('ps').value=0;updateFiberVis();updateCurMesh();updateUI();});
+document.getElementById('ps').addEventListener('input',e=>{cP=+e.target.value;cProg=0;updateFiberVis();updateCurMesh();updateUI();});
+document.getElementById('ss').addEventListener('input',e=>{cProg=+e.target.value/1000;updateCurMesh();updateUI();});
+document.getElementById('pbtn').addEventListener('click',()=>{playing=!playing;document.getElementById('pbtn').textContent=playing?'⏸ Pause':'▶ Play';});
+document.getElementById('rbtn').addEventListener('click',()=>{playing=false;document.getElementById('pbtn').textContent='▶ Play';cL=0;cP=0;cProg=0;mAng=0;updateFiberVis();updateCurMesh();updateUI();});
+
+function loadTxt(txt,name){
+  parsed=parseGcode(txt);cL=0;cP=0;cProg=0;mAng=0;
+  document.getElementById('fname').textContent=`${name} — ${parsed.layers.length} layers, Ø${parsed.lD}" × ${parsed.mLen.toFixed(0)}"`;
+  document.getElementById('hint').style.display='none';
+  ['ls','ps','ss','pbtn','rbtn'].forEach(id=>document.getElementById(id).disabled=false);
+  setupScene();
+}
+document.getElementById('fi').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();r.onload=ev=>loadTxt(ev.target.result,f.name);r.readAsText(f);e.target.value='';
+});
+const cw=document.getElementById('cw');
+cw.addEventListener('dragover',e=>e.preventDefault());
+cw.addEventListener('drop',e=>{e.preventDefault();const f=e.dataTransfer.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>loadTxt(ev.target.result,f.name);r.readAsText(f);});
+
+initThree();
+</script>
+</body></html>
